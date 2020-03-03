@@ -67,6 +67,72 @@ sub finish {
 }
 
 ####################################################################################
+sub getRowBySABandSCUI($$) {
+####################################################################################
+	my $self = shift;
+	my $sab = shift;
+	my $scui = shift;
+
+	my @CUIs;
+
+	my $q = "select CUI, AUI, SAB, SCUI, STR from MRCONSO where SAB='$sab' and SCUI='$scui' and LAT='ENG' ";
+	my $sth = $self->{dbh}->prepare($q);
+	$sth->execute();
+    my @umls_stuff;
+	while (my ($cui, $aui, $sab, $scui, $str) = $sth->fetchrow) {
+		@umls_stuff =  ($cui, $aui, $sab, $scui, $str);
+		push (@CUIs, \@umls_stuff);
+	}
+    my @unique = do { my %seen; grep { !$seen{$_}++ } @CUIs };
+	return \@unique;
+}
+####################################################################################
+sub getRow {
+####################################################################################
+	my $self = shift;
+	my $string = shift;
+	my (%param) = @_;
+	my $sab = $param{sab};
+	my @CUIs;
+
+	# identify the type of ID passed in
+	my $field;
+	if ($string =~m/L\d{7}/){
+		$field = 'LUI';
+	}elsif($string =~m/S\d{7}/){
+		$field = 'SUI';
+	}elsif($string =~m/A\d{7}/){
+		$field = 'AUI';
+	}elsif($string =~m/C\d{7}/){
+		$field = 'CUI';
+	}else{
+		$field = 'STR';
+	}
+
+	# replace the ' with \' to keep mysql happy
+	my $quote = "'";
+	$string =~ s/'/\\'/g if ($string =~ m/$quote/);
+	my $q = "select CUI, AUI, SAB, SCUI, STR from MRCONSO where $field='$string' and LAT='ENG' ";
+	if (defined $sab){
+		$sab =~s/\s//gm;
+		if (scalar (split (',', $sab)) > 1){
+			my $sabs = join ('\',\'', split (',', $sab));
+			$q .= " and SAB in ('$sabs')";
+		}else{
+			$q .= " and SAB = '$sab'";
+		}
+	}
+	my $sth = $self->{dbh}->prepare($q);
+	   $sth->execute();
+    my @umls_stuff;
+	while (my ($cui, $aui, $sab, $scui, $str) = $sth->fetchrow) {
+		@umls_stuff =  ($cui, $aui, $sab, $scui, $str);
+		push (@CUIs, \@umls_stuff);
+	}
+    my @unique = do { my %seen; grep { !$seen{$_}++ } @CUIs };
+	return \@unique;
+}
+####################################################################################
 sub getCUI {
 ####################################################################################
 	my $self = shift;
@@ -147,6 +213,43 @@ sub getAUI {
 	return @AUIs;
 }
 ####################################################################################
+sub getLUI {
+####################################################################################
+	my $self = shift;
+	my $string = shift;
+	my (%param) = @_;
+	my $sab = $param{sab};
+	my @LUIs;
+
+	# identify the type of ID passed in
+	my $field;
+	if ($string =~m/L\d{7}/){
+		$field = 'LUI';
+	}elsif($string =~m/S\d{7}/){
+		$field = 'SUI';
+	}elsif($string =~m/A\d{7}/){
+		$field = 'AUI';
+	}elsif($string =~m/C\d{7}/){
+		$field = 'CUI';
+	}else{
+		$field = 'STR';
+	}
+
+	# replace the ' with \' to keep mysql happy
+	my $quote = "'";
+	$string =~ s/'/\\'/g if ($string =~ m/$quote/);
+	my $q = "select distinct(LUI) from MRCONSO where $field='$string'";
+	if (defined $sab){
+		$q .= " and SAB = '$sab'";
+	}
+	my $sth = $self->{dbh}->prepare($q);
+	   $sth->execute();
+	while (my $lui = $sth->fetchrow){
+		push (@LUIs, $lui);
+	}
+	return @LUIs;
+}
+####################################################################################
 sub getSTR {
 ####################################################################################
 	my $self = shift;
@@ -208,7 +311,10 @@ sub getSAB {
 	# replace the ' with \' to keep mysql happy
 	my $quote = "'";
 	$string =~ s/'/\\'/g if ($string =~ m/$quote/);
-	my $q = "select distinct(SAB) from MRCONSO where $field='$string'";
+
+	#my $q = "select distinct(SAB) from MRCONSO where $field='$string'";
+	my $q = "select SAB from MRCONSO where $field='$string'";
+
 	my $sth = $self->{dbh}->prepare($q);
 	   $sth->execute();
 	while (my $sab = $sth->fetchrow){
@@ -409,6 +515,54 @@ sub getCommonParent {
 				for my $j (0..$#pn_2){
 					if ($pn_1[$i] eq $pn_2[$j]){
 						return ($pn_1[$i],"$i links from $ui_1 $j links from $ui_2");
+					}
+				}
+			}
+		}
+	}
+
+	# If nothing found, tell the user
+	return (0,"no common parent found");
+}
+####################################################################################
+sub getCommonParent2 {
+    # returns the number of links, not a string as above
+####################################################################################
+	my $self = shift;
+	my $ui_1 = shift;
+	my $ui_2 = shift;
+	my (%param) = @_;
+	my $rela = $param{rela};
+	my $sab = $param{sab};
+
+	if (not(($ui_1 =~m/C\d{7}/i and $ui_2 =~m/C\d{7}/i) or
+		  ($ui_1 =~m/A\d{7}/i and $ui_2 =~m/A\d{7}/i))){
+		return (0, 'id type mismatch b/w $ui_1 and $ui_2');
+	}
+
+	# trivial check if they are the same
+	if ($ui_1 eq $ui_2){
+		return (0, "ids are the same");
+	}
+
+	# Call the getParents subroutine to get a hash of the parent nodes
+	# the keys of the hash are the paths going to the root and the values
+	# are the immediate parents
+
+	my %pnodes_1 = %{$self->getParents($ui_1,$rela,$sab)};
+	my %pnodes_2 = %{$self->getParents($ui_2,$rela,$sab)};
+
+	# Examine the path to the parents for common nodes
+	foreach my $p (sort keys %pnodes_1){
+		foreach my $k (sort keys %pnodes_2){
+			# reverse the arrays to scan them starting from the
+			# nearest parent
+			my @pn_1 = reverse (split(/\./,$p));
+			my @pn_2 = reverse (split(/\./,$k));
+			for my $i (0..$#pn_1){
+				for my $j (0..$#pn_2){
+					if ($pn_1[$i] eq $pn_2[$j]){
+						return ($pn_1[$i],$i);
 					}
 				}
 			}
